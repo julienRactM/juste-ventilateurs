@@ -13,7 +13,7 @@ async function simulationController(fastify) {
     let currentCadenceMs = 5000; // Variable globale partagée (5s par défaut)
     // SUIVI TEMPOREL POUR L'AUTO-STOP
     let virtualMinutesElapsed = 0;
-    const ONE_WEEK_MINUTES = 7 * 24 * 60; // 10 080 minutes (7 jours)
+    const ONE_MONTH_MINUTES = 30 * 24 * 60; // 43 200 minutes (30 jours)
     function stopExistingSimulation() {
         if (timer) {
             clearInterval(timer);
@@ -88,12 +88,12 @@ async function simulationController(fastify) {
                 const service = new simulation_service_1.default(prisma_1.prisma, fastify.io, fastify.scenarioService);
                 await service.simulateTick({ persist, tickDuration });
                 virtualMinutesElapsed += minutesPerTick;
-                if (virtualMinutesElapsed >= ONE_WEEK_MINUTES) {
+                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
                     clearInterval(timer);
                     timer = undefined;
                     fastify.io.emit('simulation_auto_stopped', {
-                        reason: '1_week_completed',
-                        message: "🏁 Fin du benchmark Marseille : 1 semaine complète s'est écoulée !"
+                        reason: '1_month_completed',
+                        message: "🏁 Fin du benchmark Marseille : 1 mois complet s'est écoulé !"
                     });
                 }
             }
@@ -184,7 +184,7 @@ async function simulationController(fastify) {
                 const service = new simulation_service_1.default(prisma_1.prisma, fastify.io, fastify.scenarioService);
                 await service.simulateTick({ persist, tickDuration });
                 virtualMinutesElapsed += minutesPerTick;
-                if (virtualMinutesElapsed >= ONE_WEEK_MINUTES) {
+                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
                     clearInterval(timer);
                     timer = undefined;
                 }

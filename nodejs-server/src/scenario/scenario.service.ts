@@ -5,7 +5,14 @@ import path from "path";
 
 export interface ScenarioEvent {
     tick: number;
-    type: 'CRASH_FAN' | 'LOAD_SPIKE_ALL' | 'THERMAL_DRIFT_SERVER';
+    type:
+        | 'CRASH_FAN'
+        | 'LOAD_SPIKE_ALL'
+        | 'THERMAL_DRIFT_SERVER'
+        | 'CLEAR_THERMAL_DRIFT'
+        | 'SET_FAN_SPEED_ALL'
+        | 'SET_FAN_SPEED_SERVER'
+        | 'RESTORE_FAN';
     targetId?: number;
     value?: number;
 }
@@ -119,11 +126,54 @@ export class ScenarioService {
                             // On vérifie d'abord si le serveur existe dans notre topologie de test actuelle
                             const serverExists = await this.prisma.server.findUnique({ where: { server_id: event.targetId } });
                             if (serverExists) {
-                                this.activeThermalDrifts.set(event.targetId, event.value);
-                                console.log(`🔥 [SCÉNARIO] Dérive thermique (+${event.value}°C) appliquée au serveur ${event.targetId}`);
+                                if (event.value === 0) {
+                                    this.clearDriftForServer(event.targetId);
+                                } else {
+                                    this.activeThermalDrifts.set(event.targetId, event.value);
+                                    console.log(`🔥 [SCÉNARIO] Dérive thermique (+${event.value}°C) appliquée au serveur ${event.targetId}`);
+                                }
                             } else {
                                 console.warn(`⏭️ [SCÉNARIO] Serveur cible ${event.targetId} absent de la topologie active. Événement ignoré.`);
                             }
+                        }
+                        break;
+
+                    case 'CLEAR_THERMAL_DRIFT':
+                        if (event.targetId) {
+                            this.clearDriftForServer(event.targetId);
+                        }
+                        break;
+
+                    case 'SET_FAN_SPEED_ALL':
+                        if (event.value !== undefined) {
+                            const speed = Math.max(0, Math.min(100, Math.round(event.value)));
+                            await this.prisma.fan.updateMany({
+                                where: { control_mode: 'AUTO' },
+                                data: { speed_percent: speed, control_mode: 'AUTO', status: 'ON' }
+                            });
+                            console.log(`🌬️ [RÉGULATION] Tous les ventilateurs passent à ${speed}%.`);
+                        }
+                        break;
+
+                    case 'SET_FAN_SPEED_SERVER':
+                        if (event.targetId && event.value !== undefined) {
+                            const speed = Math.max(0, Math.min(100, Math.round(event.value)));
+                            await this.prisma.fan.updateMany({
+                                where: { server_id: event.targetId, control_mode: 'AUTO' },
+                                data: { speed_percent: speed, control_mode: 'AUTO', status: 'ON' }
+                            });
+                            console.log(`🌬️ [RÉGULATION] Ventilateurs du serveur ${event.targetId} à ${speed}%.`);
+                        }
+                        break;
+
+                    case 'RESTORE_FAN':
+                        if (event.targetId) {
+                            const speed = Math.max(0, Math.min(100, Math.round(event.value ?? 35)));
+                            await this.prisma.fan.update({
+                                where: { fan_id: event.targetId },
+                                data: { speed_percent: speed, control_mode: 'AUTO', status: 'ON' }
+                            });
+                            console.log(`✅ [RÉGULATION] Ventilateur ${event.targetId} restauré à ${speed}%.`);
                         }
                         break;
                 }

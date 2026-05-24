@@ -11,7 +11,7 @@ export default async function simulationController(fastify: FastifyInstance) {
     
     // SUIVI TEMPOREL POUR L'AUTO-STOP
     let virtualMinutesElapsed = 0;
-    const ONE_WEEK_MINUTES = 7 * 24 * 60; // 10 080 minutes (7 jours)
+    const ONE_MONTH_MINUTES = 30 * 24 * 60; // 43 200 minutes (30 jours)
 
     function stopExistingSimulation() {
     if (timer) {
@@ -96,12 +96,12 @@ export default async function simulationController(fastify: FastifyInstance) {
                 
                 virtualMinutesElapsed += minutesPerTick;
                 
-                if (virtualMinutesElapsed >= ONE_WEEK_MINUTES) {
+                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
                     clearInterval(timer);
                     timer = undefined; 
                     fastify.io.emit('simulation_auto_stopped', { 
-                        reason: '1_week_completed',
-                        message: "🏁 Fin du benchmark Marseille : 1 semaine complète s'est écoulée !"
+                        reason: '1_month_completed',
+                        message: "🏁 Fin du benchmark Marseille : 1 mois complet s'est écoulé !"
                     });
                 }
             } catch (err) {
@@ -201,7 +201,7 @@ export default async function simulationController(fastify: FastifyInstance) {
                 await service.simulateTick({ persist, tickDuration });
                 virtualMinutesElapsed += minutesPerTick;
                 
-                if (virtualMinutesElapsed >= ONE_WEEK_MINUTES) {
+                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
                     clearInterval(timer);
                     timer = undefined; 
                 }
