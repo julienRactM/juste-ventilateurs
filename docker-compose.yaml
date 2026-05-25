@@ -1,15 +1,48 @@
 services:
-  mosquitto:
-    image: eclipse-mosquitto:latest
-    container_name: mosquitto
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka-broker
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-broker:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      - "9092:9092"
     volumes:
-      - ./mosquitto/config:/mosquitto/config
-      - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
-      
+      - kafka:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  akhq:
+    image: tchiotludo/akhq:latest
+    container_name: akhq
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            kraft-kafka:
+              properties:
+                bootstrap.servers: "kafka-broker:9092"
+    ports:
+      - "9999:8080"
 
   timescaledb:
     image: timescale/timescaledb:latest-pg16
@@ -36,7 +69,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
-      - "5050:80" 
+      - "5050:80"
     depends_on:
       - timescaledb
     volumes:
@@ -70,7 +103,6 @@ services:
       - DATABASE_URL=postgresql://tsuser:tspassword@timescaledb:5432/tsdb
       - PORT=3333
       - DEBUG=prisma:config,prisma:client:setup
-      - MQTT_URL=mqtt://mosquitto:1883
       - TZ=Europe/Paris
     ports:
       - "3333:3333"
@@ -80,32 +112,33 @@ services:
     build: ./nodejs-server
     command: ["node", "dist/mqtt/producer.js"]
     depends_on:
-      mosquitto:
-        condition: service_started
+      kafka:
+        condition: service_healthy
       api-node:
         condition: service_started
     environment:
       - DATABASE_URL=postgresql://tsuser:tspassword@timescaledb:5432/tsdb
-      - MQTT_URL=mqtt://mosquitto:1883
+      - KAFKA_BROKERS=kafka-broker:9092
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
 
   mqtt-consumer:
     container_name: mqtt-consumer
     build: ./nodejs-server
+    restart: unless-stopped
     command: ["node", "dist/mqtt/stateless-consumer.js"]
-    # command: ["node", "dist/src/mqtt/statefull-consumer.js"]
     depends_on:
-      mosquitto:
-        condition: service_started
+      kafka:
+        condition: service_healthy
       api-node:
         condition: service_started
       timescaledb:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://tsuser:tspassword@timescaledb:5432/tsdb
-      - MQTT_URL=mqtt://mosquitto:1883
+      - KAFKA_BROKERS=kafka-broker:9092
 
 volumes:
   grafana_data:
   pgadmin_data:
   timescaledb:
+  kafka:

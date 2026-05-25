@@ -1,6 +1,6 @@
 // src/mqtt/producer.ts
 import "dotenv/config";
-import mqtt from "mqtt";
+import { Kafka } from "kafkajs";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from '@prisma/client';
@@ -10,15 +10,18 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-const BROKER_URL = process.env.MQTT_URL || "mqtt://mosquitto:1883";
-const client = mqtt.connect(BROKER_URL);
+const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "kafka-broker:9092").split(",");
+const TOPIC = "telemetry";
 
-const WEATHER_REFRESH_INTERVAL = 20 * 60 * 1000; 
+const kafka = new Kafka({ clientId: "dc-producer", brokers: KAFKA_BROKERS });
+const producer = kafka.producer();
+
+const WEATHER_REFRESH_INTERVAL = 20 * 60 * 1000;
 const AC_TARGET = 20.0;
 const AC_EFFICIENCY = 0.92;
 
 const globalWeather: Record<string, number> = {};
-let dynamicTelemetryInterval = 5000; 
+let dynamicTelemetryInterval = 5000;
 
 let fallbackSimulatedDate = new Date("2026-05-18T00:00:00.000Z");
 
@@ -36,19 +39,20 @@ async function refreshAllCitiesWeather(cities: string[]) {
   }
 }
 
-client.on("connect", async () => {
-  console.log("✅ [MQTT-PRODUCER] Connecté au Broker Mosquitto.");
+async function main() {
+  await producer.connect();
+  console.log("✅ [KAFKA-PRODUCER] Connecté au broker Kafka.");
 
   const ALL_POSSIBLE_CITIES = ['Paris', 'Marseille', 'Frankfurt', 'Oslo', 'Dublin'];
   await refreshAllCitiesWeather(ALL_POSSIBLE_CITIES);
   setInterval(() => refreshAllCitiesWeather(ALL_POSSIBLE_CITIES), WEATHER_REFRESH_INTERVAL);
 
-const runLoop = async () => {
+  const runLoop = async () => {
     try {
       let simulatedDate: Date;
       let loadMultiplier = 1.0;
       let thermalDrifts: Record<number, number> = {};
-      let isRunning = false; // 🌟 On ajoute le flag d'état
+      let isRunning = false;
 
       try {
         const response = await fetch("http://api-node:3333/internal/cadence");
@@ -57,11 +61,11 @@ const runLoop = async () => {
           dynamicTelemetryInterval = syncData.cadenceMs ?? 5000;
           loadMultiplier = syncData.loadMultiplier ?? 1.0;
           thermalDrifts = syncData.thermalDrifts ?? {};
-          isRunning = syncData.isRunning ?? false; // 🌟 Récupération du flag depuis l'API Node
+          isRunning = syncData.isRunning ?? false;
 
           if (syncData.currentSimulatedDate) {
             simulatedDate = new Date(syncData.currentSimulatedDate);
-            fallbackSimulatedDate = new Date(simulatedDate); 
+            fallbackSimulatedDate = new Date(simulatedDate);
           } else {
             fallbackSimulatedDate.setHours(fallbackSimulatedDate.getHours() + 1);
             simulatedDate = new Date(fallbackSimulatedDate);
@@ -75,10 +79,9 @@ const runLoop = async () => {
         simulatedDate = new Date(fallbackSimulatedDate);
       }
 
-      // 🌟 SÉCURITÉ ABSOLUE : Si l'API Node dit que la simulation est sur PAUSE, on n'envoie RIEN !
       if (!isRunning) {
-        console.log("💤 [MQTT-PRODUCER] Le jumeau numérique est en pause. En attente d'un top départ...");
-        return; // On stoppe l'itération ici, le bloc "finally" replanifiera la vérification au prochain coup
+        console.log("💤 [KAFKA-PRODUCER] Le jumeau numérique est en pause. En attente d'un top départ...");
+        return;
       }
 
       const activeClusters = await prisma.cluster.findMany({
@@ -90,12 +93,14 @@ const runLoop = async () => {
 
       const currentHour = simulatedDate.getHours();
 
+      // Collect all messages for this tick and send them in a single batch
+      const messages: { key: string; value: string }[] = [];
+
       for (const cluster of activeClusters) {
         const city = cluster.clusterLocation.name;
         const tExt = globalWeather[city] || 18.0;
         const tAmb = AC_TARGET + (tExt - AC_TARGET) * (1 - AC_EFFICIENCY);
 
-        // 🌟 Requête corrigée conforme à la table pivot du schéma
         const profileRow = await prisma.loadProfile.findFirst({
           where: {
             hour: currentHour,
@@ -110,7 +115,7 @@ const runLoop = async () => {
 
         for (const server of cluster.servers) {
           const isMaster = server.hostname.toLowerCase().includes("master");
-          
+
           let finalLoad = isMaster ? 0.12 : profileLoadFactor * loadMultiplier;
           if (finalLoad > 1.0) finalLoad = 1.0;
           if (finalLoad < 0.0) finalLoad = 0.0;
@@ -126,50 +131,56 @@ const runLoop = async () => {
           const fanSpeed = activeFansCount > 0 ? totalSpeed / server.fans.length : 0;
           const drift = thermalDrifts[server.server_id] ?? 0.0;
 
-          // 🌟 PHYSIQUE THERMIQUE PIMENTÉE ET RÉALISTE DU PRODUCTEUR
           let computedTemp = tAmb + (finalLoad * 55) + drift;
-
           if (fanSpeed > 0) {
             const coolingPower = (fanSpeed / 100) * 25 * (finalLoad + 0.3);
             computedTemp -= coolingPower;
           }
-
           if (computedTemp < tAmb) computedTemp = tAmb;
           if (computedTemp > 105.0) computedTemp = 105.0;
 
-          const baseConsumption = 120; 
-          const maxConsumption = 450;  
+          const baseConsumption = 120;
+          const maxConsumption = 450;
           const currentPower = baseConsumption + (finalLoad * (maxConsumption - baseConsumption)) + (fanSpeed * 0.6);
 
           const payload = {
             timestamp: simulatedDate.toISOString(),
             hostname: server.hostname,
             environment: { external_city: city, external_temp: tExt.toFixed(1), ambient_dc_temp: tAmb.toFixed(1) },
-            current_fan_speed: fanSpeed, 
+            current_fan_speed: fanSpeed,
             load_percent: (finalLoad * 100).toFixed(2),
             sensors: server.sensors.map(s => {
               let finalValue = 0;
               if (s.sensor_type === "CPU_TEMP") finalValue = computedTemp + (Math.random() - 0.5) * 0.3;
               else if (s.sensor_type === "LOAD") finalValue = finalLoad * 100;
-              else if (s.sensor_type.startsWith("FAN_SPEED")) finalValue = fanSpeed; 
+              else if (s.sensor_type.startsWith("FAN_SPEED")) finalValue = fanSpeed;
               else if (s.sensor_type === "TOTAL_POWER") finalValue = currentPower;
-
               return { id: s.sensor_id, type: s.sensor_type, value: finalValue.toFixed(2), unit: s.unit };
             })
           };
 
-          client.publish(`v1/gateway/telemetry/${server.hostname}`, JSON.stringify(payload));
+          // Kafka key = hostname → guarantees ordering per server within a partition
+          messages.push({ key: server.hostname, value: JSON.stringify(payload) });
         }
       }
-      
-      console.log(`[📤 MQTT] Télémétrie transmise pour la date virtuelle : ${simulatedDate.toISOString()}`);
+
+      if (messages.length > 0) {
+        await producer.send({ topic: TOPIC, messages });
+      }
+
+      console.log(`[📤 KAFKA] Télémétrie transmise pour la date virtuelle : ${simulatedDate.toISOString()}`);
 
     } catch (globalError) {
-      console.error("❌ CRASH TICK PRODUCER MQTT :", globalError);
+      console.error("❌ CRASH TICK PRODUCER KAFKA :", globalError);
     } finally {
       setTimeout(runLoop, dynamicTelemetryInterval);
     }
   };
 
   setTimeout(runLoop, dynamicTelemetryInterval);
+}
+
+main().catch(err => {
+  console.error("❌ Erreur fatale du producteur Kafka :", err);
+  process.exit(1);
 });

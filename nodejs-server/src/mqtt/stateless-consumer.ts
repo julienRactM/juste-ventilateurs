@@ -1,60 +1,74 @@
-import mqtt from 'mqtt';
+import "dotenv/config";
+import { Kafka } from "kafkajs";
 import { prisma } from '../prisma/prisma';
 
-const client = mqtt.connect(process.env.MQTT_URL || 'mqtt://mosquitto:1883');
-// 🌟 On écoute le topic de la passerelle
-const TOPIC_TELEMETRIE = 'v1/gateway/telemetry/#';
+const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "kafka-broker:9092").split(",");
+const TOPIC = "telemetry";
+const GROUP_ID = "dc-consumer-stateless";
 
-client.on('connect', () => {
+const kafka = new Kafka({ clientId: "dc-consumer", brokers: KAFKA_BROKERS });
+const admin = kafka.admin();
+const consumer = kafka.consumer({ groupId: GROUP_ID });
+
+async function main() {
+  // Ensure the topic exists before subscribing — Kafka won't auto-create it for consumers
+  await admin.connect();
+  await admin.createTopics({
+    topics: [{ topic: TOPIC, numPartitions: 3, replicationFactor: 1 }],
+  });
+  await admin.disconnect();
+
+  await consumer.connect();
+  await consumer.subscribe({ topic: TOPIC, fromBeginning: false });
   console.log('📥 Consumer connecté et en écoute du jumeau numérique...');
-  client.subscribe(TOPIC_TELEMETRIE); 
-});
 
-client.on('message', async (topic, message) => {
-  try {
-    const payload = JSON.parse(message.toString());
-    const virtualTime = new Date(payload.timestamp);
+  await consumer.run({
+    eachMessage: async ({ message }) => {
+      if (!message.value) return;
 
-    if (!payload.sensors || !Array.isArray(payload.sensors)) {
-      return; // Si le format ne correspond pas, on évite le crash
-    }
-
-    // 🌟 On boucle sur les capteurs du tableau
-    for (const sensor of payload.sensors) {
-      const sensorId = Number(sensor.id);
-      const sensorValue = parseFloat(sensor.value);
-
-      if (isNaN(sensorId) || isNaN(sensorValue)) continue;
-
-      // 🌟 PROTECTION CHIRURGICALE POUR LES RESETS DE TOPOLOGIE
       try {
-        console.log(`➔ [DB TRY] Tentative d'insertion pour le capteur ${sensorId} (Valeur: ${sensorValue})...`);
+        const payload = JSON.parse(message.value.toString());
+        const virtualTime = new Date(payload.timestamp);
 
-        // Insertion de chaque métrique
-        await prisma.sensorData.create({
-          data: { sensor_id: sensorId, value: sensorValue, time: virtualTime }
-        });
+        if (!payload.sensors || !Array.isArray(payload.sensors)) return;
 
-        console.log(`  ✔ [DB SUCCESS] Capteur ${sensorId} inséré avec succès !`);
+        for (const sensor of payload.sensors) {
+          const sensorId = Number(sensor.id);
+          const sensorValue = parseFloat(sensor.value);
 
-        await prisma.sensor.update({
-          where: { sensor_id: sensorId },
-          data: { last_value: sensorValue }
-        });
-        
-      } catch (dbError: any) {
-        // Si c'est l'erreur Prisma P2003 (Clé étrangère manquante), c'est un capteur fantôme
-        if (dbError.code === 'P2003') {
-          console.warn(`⚠️ [MÉMOIRE] Capteur obsolète ignoré (ID: ${sensorId}). La topologie a été reconstruite.`);
-          continue; // 🌟 TRÈS IMPORTANT : On passe au capteur suivant de la liste sans bloquer le reste !
+          if (isNaN(sensorId) || isNaN(sensorValue)) continue;
+
+          try {
+            console.log(`➔ [DB TRY] Tentative d'insertion pour le capteur ${sensorId} (Valeur: ${sensorValue})...`);
+
+            await prisma.sensorData.create({
+              data: { sensor_id: sensorId, value: sensorValue, time: virtualTime }
+            });
+
+            console.log(`  ✔ [DB SUCCESS] Capteur ${sensorId} inséré avec succès !`);
+
+            await prisma.sensor.update({
+              where: { sensor_id: sensorId },
+              data: { last_value: sensorValue }
+            });
+
+          } catch (dbError: any) {
+            if (dbError.code === 'P2003') {
+              console.warn(`⚠️ [MÉMOIRE] Capteur obsolète ignoré (ID: ${sensorId}). La topologie a été reconstruite.`);
+              continue;
+            }
+            console.error(`❌ Erreur d'écriture pour le capteur ${sensorId} :`, dbError.message);
+          }
         }
-        
-        // Si c'est une autre erreur de base de données, on la logue pour ne pas couper le flux
-        console.error(`❌ Erreur d'écriture pour le capteur ${sensorId} :`, dbError.message);
+
+      } catch (err) {
+        console.error('❌ Erreur générale d\'analyse du message Kafka :', err);
       }
     }
+  });
+}
 
-  } catch (err) {
-    console.error('❌ Erreur générale d\'analyse du batch MQTT :', err);
-  }
+main().catch(err => {
+  console.error("❌ Erreur fatale du consumer Kafka :", err);
+  process.exit(1);
 });
