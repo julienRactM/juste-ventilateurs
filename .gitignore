@@ -3,4 +3,3 @@ timescaledb/
 timescale_data/
 *.sql
 *.csv
-mosquitto/data/
