@@ -10,6 +10,19 @@ import {
 export default async function fanController(fastify: FastifyInstance) {
   const hardwareService = new HardwareService();
 
+  fastify.get(
+    '/fans',
+    {
+      schema: {
+        description: 'Liste les ventilateurs physiques avec leur serveur associé',
+        tags: ['Hardware'],
+      }
+    },
+    async () => {
+      return await hardwareService.listFansWithServers();
+    }
+  );
+
   fastify.patch<{ Params: UpdateFanParams; Body: UpdateFanBody }>(
     '/fans/:id', 
     {

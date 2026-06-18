@@ -46,6 +46,28 @@ export default class HardwareService {
   }
 
   /**
+   * Liste les ventilateurs avec le serveur associé.
+   * Utile pour les agents externes : la télémétrie MQTT donne le hostname,
+   * alors que la route PATCH /fans/:id attend un fan_id physique.
+   */
+  async listFansWithServers() {
+    return await prisma.fan.findMany({
+      include: {
+        server: {
+          select: {
+            server_id: true,
+            hostname: true
+          }
+        }
+      },
+      orderBy: [
+        { server_id: 'asc' },
+        { fan_id: 'asc' }
+      ]
+    });
+  }
+
+  /**
    * Alerte : Change le statut d'un serveur si une anomalie est détectée
    */
   async updateServerStatus(serverId: number, status: 'ON' | 'OFF' | 'MAINTENANCE') {

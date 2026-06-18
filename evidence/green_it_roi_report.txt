@@ -1,0 +1,18 @@
+Green IT / PUE / ROI summary
+PUE: 1.56
+Energy price: 0.20 EUR/kWh
+
+ strategy  | server_hours | avg_server_power_w | max_server_power_w | avg_fan_speed | max_cpu_temp | cpu_points_over_70 | it_energy_kwh | building_energy_kwh | estimated_cost_eur 
+-----------+--------------+--------------------+--------------------+---------------+--------------+--------------------+---------------+---------------------+--------------------
+ fixed_35  |         7070 |             246.79 |             471.00 |         35.09 |        77.63 |                 31 |       1744.83 |             2721.94 |             544.39
+ fixed_100 |         7080 |             285.66 |             510.00 |         99.91 |        56.50 |                  0 |       2022.50 |             3155.10 |             631.02
+ agent_ml  |         7090 |             248.60 |             507.00 |         38.32 |        73.63 |                 13 |       1762.54 |             2749.56 |             549.91
+(3 rows)
+
+
+ROI versus fixed_100
+ fixed_100_cost_eur | agent_ml_cost_eur | estimated_saving_eur | saving_percent | fixed_100_building_kwh | agent_ml_building_kwh 
+--------------------+-------------------+----------------------+----------------+------------------------+-----------------------
+             631.02 |            549.91 |                81.11 |          12.85 |                3155.10 |               2749.56
+(1 row)
+

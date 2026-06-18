@@ -3,3 +3,5 @@ timescaledb/
 timescale_data/
 *.sql
 *.csv
+.venv/
+models/*.joblib

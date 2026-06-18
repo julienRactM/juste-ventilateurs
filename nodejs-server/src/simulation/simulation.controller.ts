@@ -21,6 +21,59 @@ export default async function simulationController(fastify: FastifyInstance) {
         }
     }
 
+    function shouldPersist(value: unknown): boolean {
+        return value === true || value === 'true' || value === '1';
+    }
+
+    function resolveStartDate(startDateQuery?: string): Date {
+        let startDate = new Date("2026-05-18T00:00:00.000Z");
+        if (startDateQuery) {
+            const parsedDate = new Date(startDateQuery);
+            if (!isNaN(parsedDate.getTime())) {
+                startDate = parsedDate;
+            }
+        }
+        return startDate;
+    }
+
+    function resolveMinutesPerTick(tickDuration: string): number {
+        if (tickDuration === '1h') return 60;
+        return parseInt(tickDuration, 10) || 60;
+    }
+
+    function startSimulationLoop(options: {
+        cadenceSeconds: number;
+        tickDuration: string;
+        persist: boolean;
+    }): void {
+        virtualMinutesElapsed = 0;
+        currentCadenceMs = options.cadenceSeconds * 1000;
+        const minutesPerTick = resolveMinutesPerTick(options.tickDuration);
+
+        timer = setInterval(async () => {
+            try {
+                const service = new SimulationService(prisma, fastify.io, fastify.scenarioService);
+                await service.simulateTick({
+                    tickDuration: options.tickDuration,
+                    persist: options.persist
+                });
+                
+                virtualMinutesElapsed += minutesPerTick;
+                
+                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
+                    clearInterval(timer);
+                    timer = undefined; 
+                    fastify.io.emit('simulation_auto_stopped', { 
+                        reason: '1_month_completed',
+                        message: "Fin du benchmark : 1 mois complet s'est écoulé."
+                    });
+                }
+            } catch (err) {
+                fastify.log.error(err);
+            }
+        }, currentCadenceMs);
+    }
+
     /**
      * GET /internal/cadence
      * Endpoint privé de synchronisation complète pour le mqtt-producer
@@ -39,7 +92,7 @@ export default async function simulationController(fastify: FastifyInstance) {
      * POST /sim/scenarios/marseille
      * Lance le scénario Marseille avec cadence, durée de ticks et date de départ ajustables
      */
-    fastify.post<{ Querystring: { cadence?: number; tickDuration?: string; startDate?: string } }>('/sim/scenarios/marseille', {
+    fastify.post<{ Querystring: { cadence?: number; tickDuration?: string; startDate?: string; persist?: string } }>('/sim/scenarios/marseille', {
         schema: { 
             tags: ['Simulation'], 
             description: 'Arme le scénario de Marseille à horaire fixe (Lundi par défaut) et démarre la boucle à vitesse configurable',
@@ -48,27 +101,22 @@ export default async function simulationController(fastify: FastifyInstance) {
                 properties: {
                     cadence: { type: 'number', enum: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], default: 5 },
                     tickDuration: { type: 'string', enum: ['5', '10', '15', '20', '25', '30', '1h'], default: '1h' },
-                    startDate: { type: 'string' }
+                    startDate: { type: 'string' },
+                    persist: { type: 'string', enum: ['true', 'false', '1', '0'], default: 'false' }
                 }
             }
         }
     }, async (req, reply) => {
         const cadenceSeconds = req.query.cadence ?? 5;
         const tickDuration = req.query.tickDuration ?? '1h';
+        const persist = shouldPersist(req.query.persist);
 
         if (timer) {
             clearInterval(timer);
             timer = undefined;
         }
 
-        // Horaire fixe par défaut au Lundi à 00h00 pile
-        let startDate = new Date("2026-05-18T00:00:00.000Z"); 
-        if (req.query.startDate) {
-            const parsedDate = new Date(req.query.startDate);
-            if (!isNaN(parsedDate.getTime())) {
-                startDate = parsedDate;
-            }
-        }
+        const startDate = resolveStartDate(req.query.startDate);
         SimulationService.setClock(startDate);
 
         try {
@@ -80,33 +128,7 @@ export default async function simulationController(fastify: FastifyInstance) {
             });
         }
 
-        virtualMinutesElapsed = 0;
-        currentCadenceMs = cadenceSeconds * 1000;
-
-        let minutesPerTick = 60;
-        if (tickDuration !== '1h') {
-            minutesPerTick = parseInt(tickDuration, 10) || 60;
-        }
-
-        timer = setInterval(async () => {
-            try {
-                const service = new SimulationService(prisma, fastify.io, fastify.scenarioService);
-                await service.simulateTick({ tickDuration });
-                
-                virtualMinutesElapsed += minutesPerTick;
-                
-                if (virtualMinutesElapsed >= ONE_MONTH_MINUTES) {
-                    clearInterval(timer);
-                    timer = undefined; 
-                    fastify.io.emit('simulation_auto_stopped', { 
-                        reason: '1_month_completed',
-                        message: "🏁 Fin du benchmark Marseille : 1 mois complet s'est écoulé !"
-                    });
-                }
-            } catch (err) {
-                fastify.log.error(err);
-            }
-        }, currentCadenceMs);
+        startSimulationLoop({ cadenceSeconds, tickDuration, persist });
 
         return { 
             status: "success", 
@@ -114,7 +136,63 @@ export default async function simulationController(fastify: FastifyInstance) {
             setup: {
                 cadence: `${cadenceSeconds}s par tick`,
                 virtualTimePerTick: tickDuration,
-                startedAt: startDate.toISOString()
+                startedAt: startDate.toISOString(),
+                persist
+            }
+        };
+    });
+
+    /**
+     * POST /sim/scenarios/:scenarioId
+     * Lance n'importe quel scénario déclaré dans scenarios.json.
+     */
+    fastify.post<{ Params: { scenarioId: string }; Querystring: { cadence?: number; tickDuration?: string; startDate?: string; persist?: string } }>('/sim/scenarios/:scenarioId', {
+        schema: {
+            tags: ['Simulation'],
+            description: 'Arme et démarre un scénario par son identifiant. Utilise persist=true pour écrire sensor_data.',
+            params: {
+                type: 'object',
+                properties: {
+                    scenarioId: { type: 'string', example: 'sc_training_overheat' }
+                },
+                required: ['scenarioId']
+            },
+            querystring: {
+                type: 'object',
+                properties: {
+                    cadence: { type: 'number', enum: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], default: 1 },
+                    tickDuration: { type: 'string', enum: ['5', '10', '15', '20', '25', '30', '1h'], default: '1h' },
+                    startDate: { type: 'string' },
+                    persist: { type: 'string', enum: ['true', 'false', '1', '0'], default: 'true' }
+                }
+            }
+        }
+    }, async (req, reply) => {
+        const cadenceSeconds = req.query.cadence ?? 1;
+        const tickDuration = req.query.tickDuration ?? '1h';
+        const persist = req.query.persist === undefined ? true : shouldPersist(req.query.persist);
+
+        stopExistingSimulation();
+        SimulationService.setClock(resolveStartDate(req.query.startDate));
+
+        try {
+            await fastify.scenarioService.loadScenario(req.params.scenarioId);
+        } catch (err: any) {
+            return reply.status(404).send({
+                status: 'error',
+                message: err.message
+            });
+        }
+
+        startSimulationLoop({ cadenceSeconds, tickDuration, persist });
+
+        return {
+            status: 'success',
+            message: `Scénario [${req.params.scenarioId}] lancé.`,
+            setup: {
+                cadence: `${cadenceSeconds}s par tick`,
+                virtualTimePerTick: tickDuration,
+                persist
             }
         };
     });
@@ -122,22 +200,24 @@ export default async function simulationController(fastify: FastifyInstance) {
     /**
      * POST /sim/tick
      */
-    fastify.post<{ Querystring: { tickDuration?: string } }>('/sim/tick', {
+    fastify.post<{ Querystring: { tickDuration?: string; persist?: string } }>('/sim/tick', {
         schema: { 
             tags: ['Simulation'], 
             querystring: {
                 type: 'object',
                 properties: {
-                    tickDuration: { type: 'string', enum: ['5', '10', '15', '20', '25', '30', '1h'], default: '1h' }
+                    tickDuration: { type: 'string', enum: ['5', '10', '15', '20', '25', '30', '1h'], default: '1h' },
+                    persist: { type: 'string', enum: ['true', 'false', '1', '0'], default: 'false' }
                 }
             }
         }
     }, async (req) => {
         const tickDuration = req.query.tickDuration ?? '1h';
+        const persist = shouldPersist(req.query.persist);
         
         const service = new SimulationService(prisma, fastify.io, fastify.scenarioService);
-        await service.simulateTick({ tickDuration });
-        return { status: 'success', message: `Pas de temps manuel exécuté (${tickDuration}).` };
+        await service.simulateTick({ tickDuration, persist });
+        return { status: 'success', message: `Pas de temps manuel exécuté (${tickDuration}).`, persist };
     });
 
     /**
