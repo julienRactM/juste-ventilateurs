@@ -110,12 +110,8 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 1
-              },
-              {
                 "color": "red",
-                "value": 20
+                "value": 1
               }
             ]
           },
@@ -153,11 +149,11 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH fan_by_server_tick AS (\n  SELECT\n    sd.time,\n    s.server_id,\n    AVG(sd.value) AS fan_speed\n  FROM sensor_data sd\n  JOIN sensor s ON s.sensor_id = sd.sensor_id\n  WHERE s.sensor_type LIKE 'FAN_SPEED_%'\n    AND $__timeFilter(sd.time)\n  GROUP BY sd.time, s.server_id\n)\nSELECT COUNT(*) AS ml_cooling_actions\nFROM fan_by_server_tick\nWHERE fan_speed > 35.5;",
+          "rawSql": "WITH fan_by_server_tick AS (\n  SELECT\n    sd.time,\n    s.server_id,\n    AVG(sd.value) AS fan_speed\n  FROM sensor_data sd\n  JOIN sensor s ON s.sensor_id = sd.sensor_id\n  WHERE s.sensor_type LIKE 'FAN_SPEED_%'\n    AND $__timeFilter(sd.time)\n  GROUP BY sd.time, s.server_id\n), fan_changes AS (\n  SELECT\n    time,\n    server_id,\n    fan_speed,\n    LAG(fan_speed) OVER (PARTITION BY server_id ORDER BY time) AS previous_fan_speed\n  FROM fan_by_server_tick\n)\nSELECT COUNT(*) AS ml_actions_requiring_cooling\nFROM fan_changes\nWHERE fan_speed > COALESCE(previous_fan_speed, 35) + 5\n  AND fan_speed > 35.5;",
           "refId": "A"
         }
       ],
-      "title": "Actions refroidissement ML",
+      "title": "Actions ML declenchees",
       "type": "stat"
     },
     {
@@ -556,6 +552,120 @@
         }
       ],
       "title": "Résumé par serveur",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cpu_temp"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cpu_load"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "previous_fan_speed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "new_fan_speed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "10.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH pivot AS (\n  SELECT\n    sd.time,\n    s.server_id,\n    MAX(srv.hostname) AS hostname,\n    AVG(sd.value) FILTER (WHERE s.sensor_type LIKE 'FAN_SPEED_%') AS fan_speed,\n    MAX(sd.value) FILTER (WHERE s.sensor_type = 'CPU_TEMP') AS cpu_temp,\n    MAX(sd.value) FILTER (WHERE s.sensor_type = 'LOAD') AS cpu_load\n  FROM sensor_data sd\n  JOIN sensor s ON s.sensor_id = sd.sensor_id\n  JOIN server srv ON srv.server_id = s.server_id\n  WHERE $__timeFilter(sd.time)\n    AND (s.sensor_type LIKE 'FAN_SPEED_%' OR s.sensor_type IN ('CPU_TEMP', 'LOAD'))\n  GROUP BY sd.time, s.server_id\n), fan_changes AS (\n  SELECT\n    time,\n    hostname,\n    cpu_temp,\n    cpu_load,\n    fan_speed,\n    LAG(fan_speed) OVER (PARTITION BY server_id ORDER BY time) AS previous_fan_speed\n  FROM pivot\n)\nSELECT\n  time,\n  hostname,\n  ROUND(cpu_temp::numeric, 2) AS cpu_temp,\n  ROUND(cpu_load::numeric, 2) AS cpu_load,\n  ROUND(COALESCE(previous_fan_speed, 35)::numeric, 2) AS previous_fan_speed,\n  ROUND(fan_speed::numeric, 2) AS new_fan_speed,\n  CASE\n    WHEN fan_speed >= 95 THEN 'CRITICAL'\n    WHEN fan_speed >= 75 THEN 'HIGH'\n    WHEN fan_speed >= 55 THEN 'MEDIUM'\n    ELSE 'LOW'\n  END AS action_level\nFROM fan_changes\nWHERE fan_speed > COALESCE(previous_fan_speed, 35) + 5\n  AND fan_speed > 35.5\nORDER BY time DESC, hostname\nLIMIT 50;",
+          "refId": "A"
+        }
+      ],
+      "title": "Actions ML détectées",
       "type": "table"
     }
   ],
