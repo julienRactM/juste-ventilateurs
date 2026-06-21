@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY agents ./agents
+COPY models ./models
+
+CMD ["sh", "-c", "until python -c \"import requests; requests.get('http://api-node:3333/fans', timeout=3).raise_for_status()\" >/dev/null 2>&1; do echo 'Waiting for api-node /fans...'; sleep 2; done; exec python agents/overheat_model_agent.py --model models/overheat_risk_model_h12.joblib --mqtt-host mosquitto --api-base-url http://api-node:3333 --low-threshold 0.15 --medium-threshold 0.30 --high-threshold 0.45 --maintenance-temp-threshold 74"]

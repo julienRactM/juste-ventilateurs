@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: IoT Data Stream
+    orgId: 1
+    folder: IoT Data Stream
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

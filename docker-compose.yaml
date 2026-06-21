@@ -104,6 +104,20 @@ services:
       - DATABASE_URL=postgresql://tsuser:tspassword@timescaledb:5432/tsdb
       - MQTT_URL=mqtt://mosquitto:1883
 
+  juste-ventilateurs:
+    container_name: juste-ventilateurs
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    depends_on:
+      mosquitto:
+        condition: service_started
+      api-node:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris
+
 volumes:
   grafana_data:
   pgadmin_data:
